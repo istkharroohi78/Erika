@@ -3,7 +3,7 @@
 
 import os
 import aiohttp
-import textwrap
+
 from PIL import (
     Image,
     ImageDraw,
@@ -11,28 +11,38 @@ from PIL import (
     ImageFilter,
     ImageFont,
     ImageOps,
+    ImageStat,
 )
 
 from anony import config
 from anony.helpers import Track
 
 CANVAS_SIZE = (1280, 720)
-FRAME_RECT = (180, 110, 1100, 610)
-ART_RECT = (110, 145, 530, 565)
-INFO_RECT = (285, 470, 995, 650)
-TITLE_AREA_WIDTH = 316
+
+# --- Card layout (matches the reference screenshot) ---
+CARD_SIZE = (620, 560)          # whole card (cover + bottom info bar)
+IMAGE_HEIGHT = 360               # height of the cover-art portion
+CORNER_RADIUS = 30
+
+AVATAR_SIZE = 80
+AVATAR_PAD = 18
+
+BRAND_NAME = "Chahat x mAsTeR"   # shown in the top-left pill / "Powered By" line
 
 
 class Thumbnail:
     def __init__(self):
         self.fill = (255, 255, 255)
-        self.font1 = ImageFont.truetype(
-            "anony/helpers/Poppins-ExtraBold.ttf", 65
+        self.font_title = ImageFont.truetype(
+            "anony/helpers/Poppins-ExtraBold.ttf", 40
         )
-        self.font2 = ImageFont.truetype(
-            "anony/helpers/Raleway-Bold.ttf", 30
+        self.font_subtitle = ImageFont.truetype(
+            "anony/helpers/Raleway-Bold.ttf", 22
         )
-        self.font3 = ImageFont.truetype(
+        self.font_channel = ImageFont.truetype(
+            "anony/helpers/Raleway-Bold.ttf", 20
+        )
+        self.font_pill = ImageFont.truetype(
             "anony/helpers/Raleway-Bold.ttf", 22
         )
 
@@ -50,18 +60,42 @@ class Thumbnail:
             centering=(0.5, 0.5),
         )
 
-    def add_round_corners(self, image, radius):
+    def add_round_corners(self, image, radius, corners=(True, True, True, True)):
+        """corners = (top_left, top_right, bottom_right, bottom_left)"""
         rounded = image.convert("RGBA")
-        mask = Image.new("L", rounded.size, 0)
+        w, h = rounded.size
+        mask = Image.new("L", (w, h), 0)
         draw = ImageDraw.Draw(mask)
-        draw.rounded_rectangle(
-            (0, 0, rounded.size[0], rounded.size[1]),
-            radius=radius,
-            fill=255,
-        )
-        output = Image.new("RGBA", rounded.size, (0, 0, 0, 0))
+
+        draw.rounded_rectangle((0, 0, w, h), radius=radius, fill=255)
+
+        # square off corners that should NOT be rounded
+        tl, tr, br, bl = corners
+        if not tl:
+            draw.rectangle((0, 0, radius, radius), fill=255)
+        if not tr:
+            draw.rectangle((w - radius, 0, w, radius), fill=255)
+        if not br:
+            draw.rectangle((w - radius, h - radius, w, h), fill=255)
+        if not bl:
+            draw.rectangle((0, h - radius, radius, h), fill=255)
+
+        output = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         output.paste(rounded, (0, 0), mask)
         return output
+
+    def truncate(self, text: str, limit: int) -> str:
+        return text[: limit - 3] + "..." if len(text) > limit else text
+
+    def rounded_pill(self, draw, xy, text, font, fg=(255, 255, 255),
+                      bg=(15, 15, 15, 200), pad_x=16, pad_y=8):
+        x, y = xy
+        bbox = draw.textbbox((0, 0), text, font=font)
+        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        box = [x, y, x + w + pad_x * 2, y + h + pad_y * 2]
+        draw.rounded_rectangle(box, radius=(box[3] - box[1]) // 2, fill=bg)
+        draw.text((x + pad_x, y + pad_y - bbox[1]), text, font=font, fill=fg)
+        return box
 
     async def generate(self, song: Track, size=(1280, 720)) -> str:
         try:
@@ -75,185 +109,112 @@ class Thumbnail:
 
             await self.save_thumb(temp, song.thumbnail)
 
-            youtube = Image.open(temp).convert("RGBA")
+            cover = Image.open(temp).convert("RGBA")
 
-            from PIL import ImageStat
+            # --- dominant color sample (kept for future tinting use) ---
+            small = cover.resize((50, 50))
+            r, g, b = ImageStat.Stat(small.convert("RGB")).mean[:3]
 
-            small = youtube.resize((50, 50))
-            r, g, b = ImageStat.Stat(small).mean[:3]
+            # --- Blurred, darkened background ---
+            background = self.fit_image(cover, CANVAS_SIZE)
+            background = background.filter(ImageFilter.GaussianBlur(35))
+            background = ImageEnhance.Brightness(background).enhance(0.55)
 
-            glow_color = (
-               int(r),
-               int(g),
-               int(b),
-               80
-            )
-
-            background = self.fit_image(youtube, CANVAS_SIZE)
-            background = background.filter(ImageFilter.GaussianBlur(30))
-            background = ImageEnhance.Brightness(background).enhance(0.50)
-
-            canvas = Image.new("RGBA", CANVAS_SIZE, (0,0,0,255))
+            canvas = Image.new("RGBA", CANVAS_SIZE, (0, 0, 0, 255))
             canvas.alpha_composite(background)
-            
-            glass = Image.new("RGBA", CANVAS_SIZE, (0,0,0,0))
-            gdraw = ImageDraw.Draw(glass)
 
-            gdraw.rounded_rectangle(
-                (60, 80, 1220, 640),
-                radius=42,
-                fill=(255,255,255,30),
-                outline=(255,255,255,120),
-                width=2
+            # --- Card shadow (subtle) ---
+            shadow = Image.new("RGBA", CANVAS_SIZE, (0, 0, 0, 0))
+            sdraw = ImageDraw.Draw(shadow)
+            cx = (CANVAS_SIZE[0] - CARD_SIZE[0]) // 2
+            cy = (CANVAS_SIZE[1] - CARD_SIZE[1]) // 2
+            sdraw.rounded_rectangle(
+                (cx - 6, cy - 6, cx + CARD_SIZE[0] + 6, cy + CARD_SIZE[1] + 6),
+                radius=CORNER_RADIUS + 6,
+                fill=(0, 0, 0, 120),
             )
+            shadow = shadow.filter(ImageFilter.GaussianBlur(18))
+            canvas.alpha_composite(shadow)
 
-            glass = glass.filter(
-               ImageFilter.GaussianBlur(2)
+            # --- Build the card itself ---
+            card = Image.new("RGBA", CARD_SIZE, (0, 0, 0, 0))
+
+            # card background (dark, rounded on all corners)
+            card_mask = Image.new("L", CARD_SIZE, 0)
+            ImageDraw.Draw(card_mask).rounded_rectangle(
+                (0, 0, CARD_SIZE[0], CARD_SIZE[1]), radius=CORNER_RADIUS, fill=255
             )
+            bg_layer = Image.new("RGBA", CARD_SIZE, (32, 32, 34, 255))
+            card.paste(bg_layer, (0, 0), card_mask)
 
-            canvas.alpha_composite(glass)
-            
-            artwork_size = (
-                ART_RECT[2] - ART_RECT[0],
-                ART_RECT[3] - ART_RECT[1],
+            # cover art, rounded only on the top corners
+            art = self.fit_image(cover, (CARD_SIZE[0], IMAGE_HEIGHT))
+            art = self.add_round_corners(
+                art, CORNER_RADIUS, corners=(True, True, False, False)
             )
+            card.alpha_composite(art, (0, 0))
 
-            artwork = self.add_round_corners(
-                self.fit_image(youtube, artwork_size),
-                35,
-            )
+            draw = ImageDraw.Draw(card)
 
-            glass = Image.new("RGBA", CANVAS_SIZE, (0,0,0,0))
-            ...
-            canvas.alpha_composite(glass)
+            # top-left pill: brand tag
+            self.rounded_pill(draw, (18, 18), BRAND_NAME, self.font_pill)
 
-            canvas.alpha_composite(
-               artwork,
-               (ART_RECT[0], ART_RECT[1]),
-            )
-
-            gdraw.rounded_rectangle(
-                (20, 60, 1260, 680),
-                radius=50,
-                fill=(255,255,255,55)
-            )
-
-            glass = glass.filter(ImageFilter.GaussianBlur(15))
-            canvas.alpha_composite(glass)
-
-            draw = ImageDraw.Draw(canvas)
-
+            # top-right pill: duration
             duration = song.duration
-            views = song.view_count
-            
-            text_x = 610
-
-            title = (
-                 song.title[:16] + "..."
-                 if len(song.title) > 16
-                 else song.title
+            bbox = draw.textbbox((0, 0), duration, font=self.font_pill)
+            w = bbox[2] - bbox[0]
+            self.rounded_pill(
+                draw, (CARD_SIZE[0] - w - 18 - 32, 18), duration, self.font_pill
             )
 
-            channel = (
-               song.channel_name[:27] + "..."
-               if len(song.channel_name) > 27
-               else song.channel_name
+            # bottom-left pill (on the image), channel name
+            channel_short = self.truncate(song.channel_name, 14)
+            self.rounded_pill(
+                draw, (18, IMAGE_HEIGHT - 56), channel_short, self.font_pill
             )
 
-            title_color = (255, 255, 255)
-            channel_color = (255, 255, 255)
-            views_color = (255, 255, 255)
+            # --- Bottom info bar ---
+            info_top = IMAGE_HEIGHT
 
-            import textwrap
+            avatar = self.fit_image(cover, (AVATAR_SIZE, AVATAR_SIZE))
+            avatar = self.add_round_corners(avatar, 14)
+            card.alpha_composite(avatar, (AVATAR_PAD, info_top + AVATAR_PAD))
 
+            text_x = AVATAR_PAD + AVATAR_SIZE + 18
+
+            title = self.truncate(song.title, 22)
             draw.text(
-                (560, 120),
-                "TEAM-ROCKY",
-                font=self.font3,
-                fill=(220,220,220)
-            )
-
-            lines = textwrap.wrap(title.upper(), width=14)
-
-            line1 = lines[0] if len(lines) > 0 else ""
-            line2 = lines[1] if len(lines) > 1 else ""
-
-            draw.text(
-                (600, 180),
-                line1,
-                font=ImageFont.truetype(
-                   "anony/helpers/Poppins-ExtraBold.ttf", 55
-                ),
-            fill=(255,255,255)
-            )
-
-            if line2:
-                draw.text(
-                    (600, 250),
-                    line2,
-                    font=ImageFont.truetype(
-                      "anony/helpers/Poppins-ExtraBold.ttf", 55
-                    ),
-                    fill=(255,255,255)
-               )
-
-            draw.text(
-                (600, 340),
-                "FEEL THE LOVE",
-                font=ImageFont.truetype(
-                   "anony/helpers/Poppins-ExtraBold.ttf", 55
-                ),
-                fill=(255,220,0)
+                (text_x, info_top + 14),
+                title,
+                font=self.font_title,
+                fill=(255, 255, 255),
             )
 
             draw.text(
-                (600, 430),
-                f"YouTube | {views}",
-                font=self.font2,
-                fill=(220,220,220)
+                (text_x, info_top + 66),
+                f"Powered By : {BRAND_NAME}",
+                font=self.font_subtitle,
+                fill=(210, 210, 210),
             )
 
-            draw.rounded_rectangle(
-                (600, 520, 1150, 530),
-                radius=8,
-                fill=(255,255,255,60)
-            )
-
-            draw.rounded_rectangle(
-                (600, 520, 860, 530),
-                radius=8,
-                fill=(255,255,255)
-            )
-
-            draw.ellipse(
-              (845,507,873,535),
-              fill=(255,255,255)
-            )
-
+            channel_full = self.truncate(song.channel_name, 24)
             draw.text(
-                (600, 540),
-                "00:00",
-                font=self.font3,
-                fill=(255,255,255)
+                (text_x, info_top + 98),
+                f"{channel_full}  |  {duration}",
+                font=self.font_channel,
+                fill=(180, 180, 180),
             )
 
-            draw.text(
-                (1120, 540),
-                duration,
-                font=self.font3,
-                fill=(255,255,255)
-            )
+            canvas.alpha_composite(card, (cx, cy))
 
-            canvas.save(output, format="PNG", optimize=True)
+            canvas.convert("RGB").save(output, format="PNG", optimize=True)
 
             try:
                 os.remove(temp)
-            except:
+            except Exception:
                 pass
 
             return output
 
         except Exception:
             return config.DEFAULT_THUMB
-
-
