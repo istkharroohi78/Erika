@@ -100,6 +100,43 @@ class Thumbnail:
         draw.text((x + pad_x, y + pad_y - bbox[1]), text, font=font, fill=fg)
         return box
 
+    def draw_music_note(self, draw, box, fg=(255, 255, 255)):
+        """Draws a simple eighth-note glyph using plain shapes, so it
+        renders correctly regardless of which font is loaded."""
+        x0, y0, x1, y1 = box
+        w, h = x1 - x0, y1 - y0
+
+        # scale everything relative to the tile size
+        head_r = w * 0.13
+        stem_w = w * 0.07
+        stem_h = h * 0.42
+
+        # note head (bottom-left, slightly tilted look via simple ellipse)
+        head_cx = x0 + w * 0.36
+        head_cy = y0 + h * 0.68
+        draw.ellipse(
+            (head_cx - head_r, head_cy - head_r * 0.8,
+             head_cx + head_r, head_cy + head_r * 0.8),
+            fill=fg,
+        )
+
+        # stem
+        stem_x0 = head_cx + head_r - stem_w
+        stem_top = head_cy - stem_h
+        draw.rectangle(
+            (stem_x0, stem_top, stem_x0 + stem_w, head_cy),
+            fill=fg,
+        )
+
+        # flag
+        flag_pts = [
+            (stem_x0 + stem_w, stem_top),
+            (stem_x0 + stem_w + w * 0.22, stem_top + h * 0.10),
+            (stem_x0 + stem_w + w * 0.16, stem_top + h * 0.22),
+            (stem_x0 + stem_w, stem_top + h * 0.16),
+        ]
+        draw.polygon(flag_pts, fill=fg)
+
     async def get_user_dp(self, client, user_id, output_path: str):
         """Downloads the requester's Telegram profile photo. Returns the
         local file path, or None if the user has no profile photo / it
@@ -130,10 +167,6 @@ class Thumbnail:
 
             cover = Image.open(temp).convert("RGBA")
 
-            # requester's Telegram profile photo (falls back to None)
-            dp_temp = f"cache/dp_{song.id}.jpg"
-            dp_path = await self.get_user_dp(client, user_id, dp_temp)
-
             # --- dominant color sample (kept for future tinting use) ---
             small = cover.resize((50, 50))
             r, g, b = ImageStat.Stat(small.convert("RGB")).mean[:3]
@@ -159,16 +192,35 @@ class Thumbnail:
             shadow = shadow.filter(ImageFilter.GaussianBlur(18))
             canvas.alpha_composite(shadow)
 
-            # --- Build the card itself ---
+            # --- Build the card itself (glassmorphism) ---
             card = Image.new("RGBA", CARD_SIZE, (0, 0, 0, 0))
 
-            # card background (dark, rounded on all corners)
             card_mask = Image.new("L", CARD_SIZE, 0)
             ImageDraw.Draw(card_mask).rounded_rectangle(
                 (0, 0, CARD_SIZE[0], CARD_SIZE[1]), radius=CORNER_RADIUS, fill=255
             )
-            bg_layer = Image.new("RGBA", CARD_SIZE, (32, 32, 34, 255))
-            card.paste(bg_layer, (0, 0), card_mask)
+
+            # frosted-glass base: take the blurred bg behind the card, blur it
+            # further, brighten slightly, then tint with translucent white
+            glass_base = background.crop(
+                (cx, cy, cx + CARD_SIZE[0], cy + CARD_SIZE[1])
+            ).convert("RGBA")
+            glass_base = glass_base.filter(ImageFilter.GaussianBlur(20))
+            glass_base = ImageEnhance.Brightness(glass_base).enhance(1.15)
+
+            glass_tint = Image.new("RGBA", CARD_SIZE, (255, 255, 255, 40))
+            glass_base = Image.alpha_composite(glass_base, glass_tint)
+
+            card.paste(glass_base, (0, 0), card_mask)
+
+            # thin glass border/outline
+            border_draw = ImageDraw.Draw(card)
+            border_draw.rounded_rectangle(
+                (1, 1, CARD_SIZE[0] - 2, CARD_SIZE[1] - 2),
+                radius=CORNER_RADIUS,
+                outline=(255, 255, 255, 130),
+                width=2,
+            )
 
             # cover art, rounded only on the top corners
             art = self.fit_image(cover, (CARD_SIZE[0], IMAGE_HEIGHT))
@@ -176,6 +228,20 @@ class Thumbnail:
                 art, CORNER_RADIUS, corners=(True, True, False, False)
             )
             card.alpha_composite(art, (0, 0))
+
+            # subtle dark glass tint under the bottom info bar for text contrast
+            from PIL import ImageChops
+
+            info_tint = Image.new("RGBA", CARD_SIZE, (0, 0, 0, 0))
+            it_draw = ImageDraw.Draw(info_tint)
+            it_draw.rectangle(
+                (0, IMAGE_HEIGHT, CARD_SIZE[0], CARD_SIZE[1]),
+                fill=(15, 15, 18, 110),
+            )
+            r_, g_, b_, a_ = info_tint.split()
+            a_ = ImageChops.multiply(a_, card_mask)
+            info_tint = Image.merge("RGBA", (r_, g_, b_, a_))
+            card.alpha_composite(info_tint)
 
             draw = ImageDraw.Draw(card)
 
@@ -199,34 +265,7 @@ class Thumbnail:
             # --- Bottom info bar ---
             info_top = IMAGE_HEIGHT
 
-            # requester DP tile — falls back to a music-note icon if no DP
-            icon_box = (
-                AVATAR_PAD,
-                info_top + AVATAR_PAD,
-                AVATAR_PAD + AVATAR_SIZE,
-                info_top + AVATAR_PAD + AVATAR_SIZE,
-            )
-
-            if dp_path and os.path.exists(dp_path):
-                dp_img = Image.open(dp_path).convert("RGBA")
-                dp_img = self.fit_image(dp_img, (AVATAR_SIZE, AVATAR_SIZE))
-                dp_img = self.add_round_corners(dp_img, 14)
-                card.alpha_composite(dp_img, (AVATAR_PAD, info_top + AVATAR_PAD))
-            else:
-                accent = (
-                    min(int(r) + 30, 255),
-                    min(int(g) + 30, 255),
-                    min(int(b) + 30, 255),
-                )
-                draw.rounded_rectangle(icon_box, radius=14, fill=accent)
-                note = "\u266A"  # ♪
-                nbbox = draw.textbbox((0, 0), note, font=self.font_note)
-                nw, nh = nbbox[2] - nbbox[0], nbbox[3] - nbbox[1]
-                note_x = icon_box[0] + (AVATAR_SIZE - nw) / 2 - nbbox[0]
-                note_y = icon_box[1] + (AVATAR_SIZE - nh) / 2 - nbbox[1]
-                draw.text((note_x, note_y), note, font=self.font_note, fill=(255, 255, 255))
-
-            text_x = AVATAR_PAD + AVATAR_SIZE + 18
+            text_x = AVATAR_PAD
 
             title = self.truncate(song.title, 22)
             draw.text(
@@ -257,12 +296,6 @@ class Thumbnail:
 
             try:
                 os.remove(temp)
-            except Exception:
-                pass
-
-            try:
-                if dp_path and os.path.exists(dp_path):
-                    os.remove(dp_path)
             except Exception:
                 pass
 
