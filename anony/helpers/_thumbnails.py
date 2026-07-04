@@ -45,6 +45,9 @@ class Thumbnail:
         self.font_pill = ImageFont.truetype(
             "anony/helpers/Raleway-Bold.ttf", 22
         )
+        self.font_note = ImageFont.truetype(
+            "anony/helpers/Raleway-Bold.ttf", 42
+        )
 
     async def save_thumb(self, output_path: str, url: str) -> str:
         async with aiohttp.ClientSession() as session:
@@ -97,7 +100,23 @@ class Thumbnail:
         draw.text((x + pad_x, y + pad_y - bbox[1]), text, font=font, fill=fg)
         return box
 
-    async def generate(self, song: Track, size=(1280, 720)) -> str:
+    async def get_user_dp(self, client, user_id, output_path: str):
+        """Downloads the requester's Telegram profile photo. Returns the
+        local file path, or None if the user has no profile photo / it
+        couldn't be fetched (caller should fall back to the note icon)."""
+        if client is None or user_id is None:
+            return None
+        try:
+            photos = await client.get_profile_photos(user_id, limit=1)
+            if not photos or getattr(photos, "total_count", len(photos)) == 0:
+                return None
+            file_id = photos[0].file_id
+            path = await client.download_media(file_id, file_name=output_path)
+            return path
+        except Exception:
+            return None
+
+    async def generate(self, song: Track, client=None, user_id=None, size=(1280, 720)) -> str:
         try:
             os.makedirs("cache", exist_ok=True)
 
@@ -110,6 +129,10 @@ class Thumbnail:
             await self.save_thumb(temp, song.thumbnail)
 
             cover = Image.open(temp).convert("RGBA")
+
+            # requester's Telegram profile photo (falls back to None)
+            dp_temp = f"cache/dp_{song.id}.jpg"
+            dp_path = await self.get_user_dp(client, user_id, dp_temp)
 
             # --- dominant color sample (kept for future tinting use) ---
             small = cover.resize((50, 50))
@@ -176,9 +199,32 @@ class Thumbnail:
             # --- Bottom info bar ---
             info_top = IMAGE_HEIGHT
 
-            avatar = self.fit_image(cover, (AVATAR_SIZE, AVATAR_SIZE))
-            avatar = self.add_round_corners(avatar, 14)
-            card.alpha_composite(avatar, (AVATAR_PAD, info_top + AVATAR_PAD))
+            # requester DP tile — falls back to a music-note icon if no DP
+            icon_box = (
+                AVATAR_PAD,
+                info_top + AVATAR_PAD,
+                AVATAR_PAD + AVATAR_SIZE,
+                info_top + AVATAR_PAD + AVATAR_SIZE,
+            )
+
+            if dp_path and os.path.exists(dp_path):
+                dp_img = Image.open(dp_path).convert("RGBA")
+                dp_img = self.fit_image(dp_img, (AVATAR_SIZE, AVATAR_SIZE))
+                dp_img = self.add_round_corners(dp_img, 14)
+                card.alpha_composite(dp_img, (AVATAR_PAD, info_top + AVATAR_PAD))
+            else:
+                accent = (
+                    min(int(r) + 30, 255),
+                    min(int(g) + 30, 255),
+                    min(int(b) + 30, 255),
+                )
+                draw.rounded_rectangle(icon_box, radius=14, fill=accent)
+                note = "\u266A"  # ♪
+                nbbox = draw.textbbox((0, 0), note, font=self.font_note)
+                nw, nh = nbbox[2] - nbbox[0], nbbox[3] - nbbox[1]
+                note_x = icon_box[0] + (AVATAR_SIZE - nw) / 2 - nbbox[0]
+                note_y = icon_box[1] + (AVATAR_SIZE - nh) / 2 - nbbox[1]
+                draw.text((note_x, note_y), note, font=self.font_note, fill=(255, 255, 255))
 
             text_x = AVATAR_PAD + AVATAR_SIZE + 18
 
@@ -211,6 +257,12 @@ class Thumbnail:
 
             try:
                 os.remove(temp)
+            except Exception:
+                pass
+
+            try:
+                if dp_path and os.path.exists(dp_path):
+                    os.remove(dp_path)
             except Exception:
                 pass
 
