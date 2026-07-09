@@ -70,7 +70,7 @@ bash start
     </summary>
 
 > Click on the button below to deploy on Heroku<br>
-    <a href="https://dashboard.heroku.com/new?template=https://github.com/AnonymousX1025/AnonXMusic">
+    <a href="https://dashboard.heroku.com/new?template=https://github.com/istkharroohi78/Erika">
         <img src="https://img.shields.io/badge/Deploy%20On%20Heroku-black?style=for-the-badge&logo=heroku"/>
     </a>
 </details>
