@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 # This file is part of AnonXMusic
 
-
 import os
 import asyncio
 
@@ -45,20 +44,24 @@ async def _broadcast(_, message: types.Message):
             message.text,
         )
     )).pin(disable_notification=False)
+    
     await asyncio.sleep(5)
 
     failed = ""
+    stopped = False
+    
     for chat in chats:
+        # Stop command check
         if not broadcasting:
-            await sent.edit_text(message.lang["gcast_stopped"].format(count, ucount))
+            stopped = True
             break
 
         try:
-            (
+            if "-copy" in message.text:
                 await msg.copy(chat, reply_markup=msg.reply_markup)
-                if "-copy" in message.text
-                else await msg.forward(chat)
-            )
+            else:
+                await msg.forward(chat)
+            
             if chat in groups:
                 count += 1
             else:
@@ -70,7 +73,13 @@ async def _broadcast(_, message: types.Message):
             failed += f"{chat} - {ex}\n"
             continue
 
-    text = message.lang["gcast_end"].format(count, ucount)
+    # Set appropriate text based on whether it finished or was stopped
+    if stopped:
+        text = message.lang["gcast_stopped"].format(count, ucount)
+    else:
+        text = message.lang["gcast_end"].format(count, ucount)
+
+    # Handle errors file if any chats failed
     if failed:
         with open("errors.txt", "w") as f:
             f.write(failed)
@@ -79,8 +88,10 @@ async def _broadcast(_, message: types.Message):
             caption=text,
         )
         os.remove("errors.txt")
+    else:
+        await sent.edit_text(text)
+        
     broadcasting = False
-    await sent.edit_text(text)
 
 
 @app.on_message(filters.command(["stop_gcast", "stop_broadcast"]) & app.sudoers)
